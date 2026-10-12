@@ -1,4 +1,4 @@
-# WhatsApp College-Group Organizer
+# Stuwat_clean WhatsApp College-Group Organizer
 
 Turn WhatsApp college-group exports into a focused local dashboard for deadlines, actions, schedules, and opportunities.
 
