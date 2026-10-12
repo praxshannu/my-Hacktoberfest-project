@@ -19,7 +19,8 @@ for the page. `pytest` for the tests.
 python3 build.py
 
 # 3. Serve the repo root and open the page
-python3 -m http.server 8000
+#    The local server also proxies the browser's AI requests to LM Studio.
+python3 web/server.py
 # then visit http://localhost:8000/web/
 ```
 

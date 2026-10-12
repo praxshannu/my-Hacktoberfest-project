@@ -32,6 +32,14 @@ from categorizer import last_llm_run, load_rules, refine_with_llm, tag_message
 from parser import parse_all
 
 WS_RE = re.compile(r"\s+")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+PASSWORD_RE = re.compile(r"\b(password|passwd|pwd)\s*[:=]\s*([^\s,;]+)", re.IGNORECASE)
+
+
+def redact_display(text):
+    """Final privacy pass for UI text, independent of parser internals."""
+    text = PASSWORD_RE.sub(lambda m: "%s: [hidden]" % m.group(1), text or "")
+    return EMAIL_RE.sub("[email hidden]", text)
 
 
 def duplicate_key(text):
@@ -60,7 +68,7 @@ def dedupe(messages):
                 "group": message["group"],
                 "groups": [],
                 "text": message["text"],
-                "display_text": message["display_text"],
+                "display_text": redact_display(message["display_text"]),
                 "roll_count": message["roll_count"],
                 "deadline_text": message["deadline_text"],
                 "deadline_iso": message["deadline_iso"],
@@ -93,7 +101,7 @@ def dedupe(messages):
             entry["timestamp_raw"] = message.get("timestamp_raw")
             entry["date"] = (message["timestamp"] or "")[:10]
         if len(message.get("display_text", "")) > len(entry["display_text"]):
-            entry["display_text"] = message["display_text"]
+            entry["display_text"] = redact_display(message["display_text"])
             entry["text"] = message["text"]
             entry["preview"] = WS_RE.sub(" ", message["display_text"])[:140]
     notices = [groups[key] for key in order]
