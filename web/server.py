@@ -1,14 +1,14 @@
 """Stdlib-only local web server and loopback LM Studio proxy."""
-import json, os, re
+import json, os, re, threading, time
 from datetime import datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 try:
-    from .tasks import eligible, public_task, sort_tasks, text_hash
+    from .tasks import eligible, public_task, sort_tasks, text_hash, task_diff, rule_task
 except ImportError:  # direct `python web/server.py` launch
-    from tasks import eligible, public_task, sort_tasks, text_hash
+    from tasks import eligible, public_task, sort_tasks, text_hash, task_diff, rule_task
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_BASE = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:1234").rstrip("/")
@@ -18,6 +18,8 @@ if _url.hostname not in {"127.0.0.1", "localhost", "::1"}:
     raise SystemExit("FATAL: LLM_BASE_URL must point to 127.0.0.1, localhost, or ::1")
 OPENAI_BASE = RAW_BASE if _url.path.rstrip("/").endswith("/v1") else RAW_BASE + "/v1"
 HOST_ROOT = OPENAI_BASE[:-3] if OPENAI_BASE.endswith("/v1") else OPENAI_BASE
+TASK_JOB_LOCK = threading.Lock()
+TASK_JOB = {"state": "idle", "done": 0, "total": 0, "added": 0, "updated": 0, "removed": 0, "skipped": 0, "error": None, "model_calls": 0}
 
 class UpstreamError(Exception):
     def __init__(self, status, detail):
@@ -97,6 +99,97 @@ def prompt_for(question, notices, cap=9000):
     user = "Question: %s\nNotices:\n%s%s" % (question, "\n".join(chunks), note)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}], len(chunks)
 
+
+def _read_task_cache():
+    path = os.path.join(ROOT, "output", "tasks.json")
+    try:
+        with open(path, encoding="utf-8") as fh: cache = json.load(fh)
+    except (OSError, ValueError):
+        cache = {"updated_at": None, "tasks": {}}
+    cache.setdefault("tasks", {})
+    return path, cache
+
+
+def _write_task_cache(path, cache):
+    cache["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    with open(path, "w", encoding="utf-8") as fh: json.dump(cache, fh, ensure_ascii=False, indent=2)
+
+
+def _keyword_context(batch, tasks, notices):
+    groups = {n.get("group") for n in batch}
+    words = {w.lower() for n in batch for w in re.findall(r"[A-Za-z]{4,}", n.get("display_text", ""))}
+    picked = []
+    for task_id, task in tasks.items():
+        source = notices.get(task_id, {})
+        haystack = (str(task.get("title", "")) + " " + str(source.get("display_text", ""))).lower()
+        if source.get("group") in groups or any(word in haystack for word in words):
+            picked.append({"id": task_id, "title": task.get("title", ""), "due_date": task.get("due_date")})
+    return picked[:10]
+
+
+def _action_batches(notices):
+    actions = [n for n in notices if n.get("tag") == "Action"]
+    return [actions[i:i + 5] for i in range(0, len(actions), 5)]
+
+
+def _model_batch(batch, existing, model, date_line):
+    notices = [{"id": n["id"], "display_text": str(n.get("display_text", ""))[:600], "group": n.get("group", "")} for n in batch]
+    user = json.dumps({"notices": notices, "existing_tasks": existing}, ensure_ascii=False)
+    system = date_line + " Return a JSON object only: {\"ops\":[{\"op\":\"add\"|\"update\"|\"none\",\"notice_id\":\"...\",\"task_id\":\"existing id, only for update\",\"title\":\"max 8 words\",\"steps\":[\"...\"],\"due_text\":\"phrase from notice or null\"}]}. Ignore dates from the model; dates come only from deadline_iso."
+    if len(system) + len(user) >= 3000:
+        notices = [{"id": n["id"], "display_text": str(n.get("display_text", ""))[:300]} for n in batch]
+        user = json.dumps({"notices": notices, "existing_tasks": existing}, ensure_ascii=False)
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _run_task_update(model):
+    global TASK_JOB
+    try:
+        with open(os.path.join(ROOT, "output", "messages.json"), encoding="utf-8") as fh: notices = json.load(fh)
+        today, date_line = date_context(); path, cache = _read_task_cache(); tasks = cache["tasks"]
+        diff = task_diff(notices, tasks, today); notice_map = {n["id"]: n for n in notices}
+        for task_id in diff["removed"]: tasks.pop(task_id, None)
+        for notice in diff["new"] + diff["changed"]:
+            if notice.get("tag") in {"Deadline", "Schedule"} and notice.get("deadline_iso"):
+                tasks[notice["id"]] = rule_task(notice)
+        action_changes = [n for n in diff["new"] + diff["changed"] if n.get("tag") == "Action"]
+        planned = (len(action_changes) + 4) // 5
+        TASK_JOB.update({"state": "running", "done": 0, "total": len(action_changes), "added": 0, "updated": 0, "removed": len(diff["removed"]), "skipped": 0, "error": None, "model_calls": 0})
+        _write_task_cache(path, cache)
+        if action_changes and model:
+            for batch in [action_changes[i:i + 5] for i in range(0, len(action_changes), 5)]:
+                messages = _model_batch(batch, _keyword_context(batch, tasks, notice_map), model, date_line)
+                data = None
+                for attempt in range(2):
+                    try:
+                        data = _request(OPENAI_BASE + "/chat/completions", "POST", {"model": model, "messages": messages, "reasoning_effort": "none", "temperature": 0, "max_tokens": 800}, 90)
+                        break
+                    except Exception as exc:
+                        if attempt == 1: print("Task batch failed for %s: %s" % (", ".join(n["id"] for n in batch), exc), flush=True)
+                TASK_JOB["model_calls"] += 1
+                if data is None:
+                    TASK_JOB["skipped"] += len(batch); TASK_JOB["done"] += len(batch); continue
+                try: ops = json.loads(strip_thinking(((data.get("choices") or [{}])[0].get("message") or {}).get("content", ""))).get("ops", [])
+                except (ValueError, TypeError, AttributeError): ops = []
+                batch_ids = {n["id"] for n in batch}; task_ids = set(tasks)
+                for op in ops:
+                    if op.get("notice_id") not in batch_ids or op.get("op") not in {"add", "update", "none"}: continue
+                    if op["op"] == "update" and op.get("task_id") not in task_ids: continue
+                    if op["op"] == "none": continue
+                    notice = notice_map[op["notice_id"]]
+                    task_id = op.get("task_id") if op["op"] == "update" else notice["id"]
+                    previous = tasks.get(task_id, {})
+                    tasks[task_id] = {"id": task_id, "text_hash": text_hash(notice), "title": " ".join(str(op.get("title", "Untitled task")).split()[:8]), "steps": op.get("steps", []), "due_date": notice.get("deadline_iso"), "due_text": op.get("due_text"), "actionable": True, "source": "model"}
+                    TASK_JOB["updated" if previous else "added"] += 1
+                TASK_JOB["done"] += len(batch); _write_task_cache(path, cache)
+        elif action_changes:
+            TASK_JOB["skipped"] = len(action_changes); TASK_JOB["done"] = len(action_changes)
+        _write_task_cache(path, cache); TASK_JOB["state"] = "done"
+    except Exception as exc:
+        TASK_JOB.update({"state": "error", "error": str(exc)})
+    finally:
+        TASK_JOB["lock_released"] = True
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw): super().__init__(*a, directory=ROOT, **kw)
     def log_message(self, fmt, *args): pass
@@ -131,8 +224,12 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(200, body); self.app_log(self.path, "", 0, 200); return
         if self.path == "/api/tasks":
             self.send_json(200, load_tasks()); return
+        if self.path == "/api/tasks/status":
+            self.send_json(200, {k: TASK_JOB.get(k) for k in ("state", "done", "total", "added", "updated", "removed", "skipped", "error")}); return
         super().do_GET()
     def do_POST(self):
+        if self.path == "/api/tasks/update":
+            self.update_tasks(); return
         if self.path == "/api/tasks/generate":
             self.generate_tasks(); return
         if self.path != "/api/chat": self.send_json(404, {"error": "Unknown route"}); return
@@ -164,6 +261,27 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError as exc: self.send_json(502, {"error": str(exc)}); self.app_log(self.path, model, included, 502); return
         except Exception as exc: self.send_json(502, {"error": _error(exc)}); self.app_log(self.path, model, included, 502); return
         self.send_json(200, {"answer": content, "model": model, "notice_count": included}); self.app_log(self.path, model, included, 200)
+
+    def update_tasks(self):
+        global TASK_JOB
+        if not TASK_JOB_LOCK.acquire(blocking=False):
+            self.send_json(409, {"error": "A task update is already running"}); return
+        try:
+            try: body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            except Exception: body = {}
+            model = body.get("model")
+            with open(os.path.join(ROOT, "output", "messages.json"), encoding="utf-8") as fh: notices = json.load(fh)
+            today, _ = date_context(); _, cache = _read_task_cache(); diff = task_diff(notices, cache["tasks"], today)
+            action_changes = [n for n in diff["new"] + diff["changed"] if n.get("tag") == "Action"]
+            counts = {"new": len(diff["new"]), "changed": len(diff["changed"]), "removed": len(diff["removed"]), "unchanged": len(diff["unchanged"]), "model_calls_planned": (len(action_changes) + 4) // 5}
+            if not action_changes and not any(n.get("tag") in {"Deadline", "Schedule"} and n.get("deadline_iso") for n in diff["new"] + diff["changed"]) and not diff["removed"]:
+                TASK_JOB = {"state": "idle", "done": 0, "total": 0, "added": 0, "updated": 0, "removed": 0, "skipped": 0, "error": "Up to date", "model_calls": 0}
+                TASK_JOB_LOCK.release(); self.send_json(202, dict(counts, message="Up to date")); return
+            TASK_JOB = {"state": "starting", "done": 0, "total": len(action_changes), "added": 0, "updated": 0, "removed": 0, "skipped": 0, "error": None, "model_calls": 0}
+            threading.Thread(target=lambda: (_run_task_update(model), TASK_JOB_LOCK.release()), daemon=True).start()
+            self.send_json(202, counts)
+        except Exception as exc:
+            TASK_JOB_LOCK.release(); self.send_json(500, {"error": str(exc)})
 
     def generate_tasks(self):
         try: body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))

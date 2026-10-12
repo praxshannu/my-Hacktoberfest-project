@@ -56,3 +56,36 @@ def sort_tasks(items):
     dated = sorted((x for x in items if x["bucket"] != "no_date"), key=lambda x: (BUCKET_ORDER[x["bucket"]], x.get("due_date") or ""))
     undated = sorted((x for x in items if x["bucket"] == "no_date"), key=lambda x: x.get("timestamp", ""), reverse=True)
     return dated + undated
+
+
+def task_diff(notices, cached, today):
+    """Classify the current notice/task relation without calling a model."""
+    current = {n.get("id"): n for n in notices}
+    result = {"new": [], "changed": [], "removed": [], "unchanged": []}
+    for notice_id, task in cached.items():
+        notice = current.get(notice_id)
+        if not notice or not eligible(notice, today):
+            result["removed"].append(notice_id)
+    for notice in notices:
+        if not eligible(notice, today):
+            continue
+        old = cached.get(notice.get("id"))
+        if not old:
+            result["new"].append(notice)
+        elif old.get("text_hash") == text_hash(notice):
+            result["unchanged"].append(notice)
+        else:
+            result["changed"].append(notice)
+    return result
+
+
+def first_sentence(text, max_words=8):
+    sentence = str(text or "").replace("\n", " ").split(".", 1)[0].strip()
+    words = sentence.split()
+    return " ".join(words[:max_words]) or "Untitled task"
+
+
+def rule_task(notice):
+    return {"id": notice["id"], "text_hash": text_hash(notice), "title": first_sentence(notice.get("display_text")),
+            "steps": [], "due_date": notice.get("deadline_iso"), "due_text": notice.get("deadline_text"),
+            "actionable": True, "source": "rule"}

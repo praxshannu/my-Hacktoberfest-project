@@ -1,97 +1,172 @@
-# WhatsApp College-Group Organizer (MVP)
+# WhatsApp College-Group Organizer
 
-A local-only tool that turns cluttered WhatsApp college-group exports into a
-single home screen of what matters: deadlines first, then action items,
-room schedules, and opportunities. Noise stays hidden by default.
+Turn WhatsApp college-group exports into a focused local dashboard for deadlines, actions, schedules, and opportunities.
 
-No login, no cloud, no notifications -- just parsing, tagging, and one page.
+Everything runs on your computer. The project uses Python’s standard library for parsing and building the dashboard data, so there is no cloud account or database to configure.
 
-## How to run
+## Requirements
 
-Requirements: Python 3 (standard library only) for the pipeline; any browser
-for the page. `pytest` for the tests.
+- Python 3.9 or newer
+- A modern web browser
+- `pytest` only if you want to run the test suite
+- Optional: [LM Studio](https://lmstudio.ai/) for local AI summaries and task refinement
+
+No Python packages are required to build or run the dashboard itself.
+
+## 1. Add WhatsApp exports
+
+Create a `data/` directory in the project root, then export one or more WhatsApp chats as plain-text files:
+
+1. Open the WhatsApp group.
+2. Open the group information screen.
+3. Choose **Export chat**.
+4. Select **Without media**.
+5. Save the resulting `.txt` files inside `data/`.
+
+The expected layout is:
+
+```text
+my-hacktober-project/
+├── data/
+│   ├── class-group.txt
+│   └── department-group.txt
+└── build.py
+```
+
+Keep the exports local. They can contain personal messages and contact details.
+
+## 2. Build the project
+
+From the project root, run:
 
 ```bash
-# 1. Put your WhatsApp exports (*.txt) in data/
-#    (Export from WhatsApp: group info -> Export chat -> Without media.)
-
-# 2. Build the JSON the page reads
 python3 build.py
+```
 
-# 3. Serve the repo root and open the page
-#    The local server also proxies the browser's AI requests to LM Studio.
+The build reads every `.txt` file in `data/` and creates the JSON files consumed by the dashboard in `output/`:
+
+- `output/messages.json` — cleaned and deduplicated notices
+- `output/summary.json` — tag counts, deadlines, and duplicate groups
+
+To use different directories:
+
+```bash
+python3 build.py --data path/to/exports --out path/to/output
+```
+
+Run the build again whenever you add or change an export.
+
+## 3. Start the local web app
+
+After building the data, start the local server:
+
+```bash
 python3 web/server.py
-# then visit http://localhost:8000/web/
 ```
 
-`output/messages.json` holds one entry per unique notice (repeats collapsed
-with a `seen_count`); `output/summary.json` holds tag counts, deadlines
-sorted by date, and duplicate groups. Both are git-ignored, like `data/`.
+The server listens on port `8000` by default. To use another available port:
 
 ```bash
-python3 -m pytest tests/ -q   # parser + categorizer tests
+PORT=8080 python3 web/server.py
 ```
 
-## Project layout
+Keep this terminal window open while using the dashboard. Stop the server with `Ctrl+C`.
 
-| File               | What it does                                                        |
-| ------------------ | ------------------------------------------------------------------- |
-| `parser.py`        | Parses `data/*.txt` exports (multi-line, forwarded, media, deleted) |
-| `rules.json`       | Tag keywords/patterns -- edit this to tune categorization           |
-| `categorizer.py`   | Rule-based tagger + date extraction + roll-list redaction            |
-| `build.py`         | Runs parser + categorizer, dedupes, writes `output/*.json`          |
-| `web/index.html`   | Single static page (vanilla HTML/CSS/JS, no build step)             |
-| `tests/`           | pytest suite for parser and categorizer                             |
+## 4. Open the dashboard
 
-Tags: `Schedule` (rooms, timings) · `Deadline` (due dates, cutoffs) ·
-`Action` (register, fill, submit, bring, do X) · `Opportunity` (contests,
-internships, programs) · `Attendance` (absentee lists -- counts only) ·
-`Resource` (files, sheets, links with context) · `Noise` (deleted, bare
-links, short acks; hidden by default).
+Open this address in your browser:
 
-## How to edit `rules.json`
+```text
+http://localhost:8000/web/
+```
 
-- `priority` -- first matching tag wins (Noise checks always run first).
-- `tags.<Tag>.keywords` -- case-insensitive substrings.
-- `tags.<Tag>.patterns` -- regular expressions (case-insensitive).
-- `due_words` -- words that plus a date make a `Deadline`
-  (`deadline`, `last date`, `submit by`, ...).
-- `noise.ack_phrases` / `max_ack_words` -- what counts as a short
-  acknowledgment; `bare_link_max_context_chars` -- how much surrounding
-  text saves a bare link from being Noise.
+If you changed the port, replace `8000` with your selected port. If the page says that notice data is missing, run `python3 build.py` first.
 
-After editing, re-run `python3 build.py` and reload the page.
+## Optional: enable LM Studio
 
-## Privacy
+The dashboard works without LM Studio. Connect it only if you want local AI summaries, chat, or optional second-opinion tagging.
 
-- Phone-number senders are masked (`+91 ***** 4322`) at parse time; the
-  masker skips URLs so links keep working.
-- Emails become `[email hidden]`; `password:` / `otp:` values become
-  `[hidden]` (labels stay so you still know a credential was shared).
-- Roll-number lists are counted and redacted during the build -- `output/`
-  and the UI only ever see counts, never the lists.
-- `data/` and `output/` are git-ignored and never committed.
-
-## Optional: local LLM second opinion via LM Studio (off by default)
-
-`categorizer.refine_with_llm()` can ask a local LM Studio server
-(OpenAI-compatible API) to double-check tags on the unique notices. Rule
-tags always stand unless you opt into override. Any failure (server down,
-bad reply) keeps the rule tags, and every mismatch is logged to
-`output/llm_disagreements.json` for review.
-
-1. In LM Studio, load your model, then start its server from the
-   **Developer tab** (default address `http://localhost:1234/v1`).
-2. Note the exact model id LM Studio shows (e.g. `qwen2.5-7b-instruct`).
-3. Run the build with refining turned on:
+1. Install and open LM Studio.
+2. Load an instruction-following model.
+3. Start the local server from LM Studio’s **Developer** tab.
+4. Note the model ID shown by LM Studio.
+5. Start the organizer as usual:
 
 ```bash
-LLM_REFINE=1 LLM_MODEL=<model id> python3 build.py
+python3 web/server.py
 ```
 
-| Variable       | Meaning                                                        |
-| -------------- | -------------------------------------------------------------- |
-| `LLM_REFINE=1` | Turn the second opinion on (default: off).                     |
-| `LLM_MODEL`    | Model id as shown by LM Studio. Required when refining.        |
-| `LLM_BASE_URL` | Server base URL. Default `http://localhost:1234/v1`.           |
-| `LLM_OVERRIDE=1` | Let the LLM change `tag` (default off: only `tag_llm` is set, `tag_rule` keeps the rule tag). |
+To enable optional LLM refinement during the build, run:
+
+```bash
+LLM_REFINE=1 LLM_MODEL="your-model-id" python3 build.py
+```
+
+The default LM Studio endpoint is `http://localhost:1234/v1`. To use another local endpoint:
+
+```bash
+LLM_BASE_URL="http://127.0.0.1:1234/v1" \
+LLM_REFINE=1 \
+LLM_MODEL="your-model-id" \
+python3 build.py
+```
+
+LLM refinement is off by default. If LM Studio is unavailable, the rule-based build remains usable.
+
+## Run the tests
+
+Install `pytest` if needed, then run:
+
+```bash
+python3 -m pytest tests/ -q
+```
+
+The tests cover parsing, categorization, the build pipeline, and local server behavior.
+
+## Common troubleshooting
+
+### `python3: command not found`
+
+Install Python 3, then confirm it is available:
+
+```bash
+python3 --version
+```
+
+### `No such file or directory: data`
+
+Create the input directory and place at least one WhatsApp `.txt` export inside it:
+
+```bash
+mkdir -p data
+```
+
+### The browser says notice data is missing
+
+Build the data before starting or refreshing the server:
+
+```bash
+python3 build.py
+```
+
+### Port `8000` is already in use
+
+Start the server on another port and open the matching browser address:
+
+```bash
+PORT=8080 python3 web/server.py
+```
+
+Then visit `http://localhost:8080/web/`.
+
+### LM Studio is unavailable
+
+Make sure a model is loaded and the local server is running. You can also leave LLM refinement disabled; the organizer’s standard parsing and categorization do not require LM Studio.
+
+### The dashboard looks out of date
+
+Rebuild the JSON data, then refresh the browser:
+
+```bash
+python3 build.py
+```

@@ -37,14 +37,24 @@
   }
   function renderTasks() {
     const box = $("tasks");
-    if (!state.tasks || !state.tasks.updated_at) { box.innerHTML = '<b>Active Tasks &amp; Deadlines</b><p>No tasks yet. Click Regenerate tasks.</p><button id="regen">Regenerate tasks</button>'; }
-    else { box.innerHTML = `<b>Active Tasks &amp; Deadlines</b> <button id="regen">Regenerate tasks</button> <span class="tag">Updated ${new Date(state.tasks.updated_at).toLocaleTimeString()}</span>` + (state.tasks.tasks.length ? state.tasks.tasks.map((x) => `<details class="task"><summary><input class="task-done" type="checkbox" data-task="${esc(x.id)}" ${state.done[x.id] ? "checked" : ""}> <span class="badge ${x.bucket}">${x.bucket.replace("_", " ").toUpperCase()}</span>${esc(x.title)} ${x.due_text ? `<span class="tag">${esc(x.due_text)}</span>` : ""}</summary><ol>${(x.steps || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol><a class="source" data-source="${esc(x.source_notice_id)}">Show source notice</a></details>`).join("") : "<p>No actionable tasks found.</p>"); }
-    $("regen").onclick = generateTasks;
+    if (!state.tasks || !state.tasks.updated_at) { box.innerHTML = '<b>Active Tasks &amp; Deadlines</b><p>No tasks yet. Click Update tasks.</p><button id="regen">Update tasks</button>'; }
+    else { box.innerHTML = `<b>Active Tasks &amp; Deadlines</b> <button id="regen">Update tasks</button> <span class="tag">Updated ${new Date(state.tasks.updated_at).toLocaleTimeString()}</span>` + (state.tasks.tasks.length ? state.tasks.tasks.map((x) => `<details class="task"><summary><input class="task-done" type="checkbox" data-task="${esc(x.id)}" ${state.done[x.id] ? "checked" : ""}> <span class="badge ${x.bucket}">${x.bucket.replace("_", " ").toUpperCase()}</span>${esc(x.title)} ${x.due_text ? `<span class="tag">${esc(x.due_text)}</span>` : ""}</summary><ol>${(x.steps || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol><a class="source" data-source="${esc(x.source_notice_id)}">Show source notice</a></details>`).join("") : "<p>No actionable tasks found.</p>"); }
+    $("regen").onclick = updateTasks;
     document.querySelectorAll(".task-done").forEach((i) => { i.onclick = (e) => { e.stopPropagation(); state.done[i.dataset.task] = i.checked; saveDone(); }; });
     document.querySelectorAll(".source").forEach((a) => { a.onclick = () => { const card = document.querySelector(`[data-id="${a.dataset.source}"]`); if (card) { card.scrollIntoView({ behavior: "smooth" }); card.style.outline = "3px solid #e6a23c"; } }; });
   }
   async function loadTasks() { state.tasks = await (await fetch("/api/tasks")).json(); renderTasks(); }
-  async function generateTasks() { $("tasks").querySelector("p").textContent = `Analyzing ${state.data.length} notices…`; try { await fetch("/api/tasks/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: state.model }) }); await loadTasks(); } catch (e) { showError(e); } }
+  async function updateTasks() {
+    const box = $("tasks"); box.innerHTML = "<b>Active Tasks &amp; Deadlines</b><p>Checking for changes…</p>";
+    try {
+      const response = await fetch("/api/tasks/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: state.model }) });
+      const plan = await response.json(); if (response.status === 409) throw Error(plan.error);
+      if (plan.message === "Up to date") { box.innerHTML = "<b>Active Tasks &amp; Deadlines</b><p>Up to date.</p><button id=regen>Update tasks</button>"; $("regen").onclick = updateTasks; return; }
+      box.innerHTML = `<b>Active Tasks &amp; Deadlines</b><p>${plan.new} new, ${plan.changed} changed, ${plan.removed} removed. ${plan.model_calls_planned} model calls planned.</p>`;
+      let status; do { await new Promise((resolve) => setTimeout(resolve, 700)); status = await (await fetch("/api/tasks/status")).json(); box.querySelector("p").textContent = status.state === "running" ? `Updating ${status.done} of ${status.total} notices…` : status.state; } while (["starting", "running"].includes(status.state));
+      if (status.state === "error") throw Error(status.error); box.querySelector("p").textContent = `Added ${status.added}, updated ${status.updated}, removed ${status.removed}`; await loadTasks();
+    } catch (e) { box.innerHTML = `<b>Active Tasks &amp; Deadlines</b><p>${esc(e.message)}</p><button id=regen>Update tasks</button>`; $("regen").onclick = updateTasks; }
+  }
   async function status() { const j = await (await fetch("/api/status")).json(); state.model = (j.models || [])[0] || ""; $("models").innerHTML = (j.models || []).map((x) => `<option>${esc(x)}</option>`).join("") || "<option>No model loaded</option>"; $("badge").textContent = j.connected ? "Connected" : "Offline"; $("status").textContent = j.connected ? `Connected · ${j.today_label}` : (j.error || "Offline"); }
   async function ask(question) { $("synthesis").innerHTML = "Loading…"; try { const j = await (await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: state.model, question, notices: visible() }) })).json(); if (j.error) throw Error(j.error); $("synthesis").innerHTML = markdown(j.answer); $("log").innerHTML += `<div class="bubble user">${markdown(question)}</div><div class="bubble ai">${markdown(j.answer)}</div>`; } catch (e) { showError(e); } }
   async function load() { try { state.data = await (await fetch("/api/notices")).json(); render(); await loadTasks(); await status(); } catch (e) { showError(e); } }
