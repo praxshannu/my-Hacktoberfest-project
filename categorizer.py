@@ -92,6 +92,12 @@ def _is_bare_link(text, rules):
     for marker in MEDIA_MARKERS:
         stripped = stripped.replace(marker, " ").replace(marker.upper(), " ")
     stripped = re.sub(r"\s+", " ", stripped).strip(" .,:;-|")
+    # A filename or any real word is context -- e.g. a forwarded marks PDF
+    # is a Resource, while a bare "<image omitted>" is Noise.
+    if re.search(r"\.\w{2,4}\b", stripped):
+        return False
+    if re.findall(r"[A-Za-z]{4,}", stripped):
+        return False
     limit = rules.get("noise", {}).get("bare_link_max_context_chars", 30)
     has_link = bool(URL_RE.search(text)) or "<" in text and "omitted>" in text.lower()
     return has_link and len(stripped) <= limit
