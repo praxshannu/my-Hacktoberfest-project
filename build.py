@@ -4,14 +4,18 @@ Reads every *.txt export in data/, writes:
 
     output/messages.json  deduped notices (one entry per unique notice,
                           with seen_count, groups, and all occurrence times)
-    output/summary.json   counts per tag, upcoming deadlines sorted by date,
-                          duplicate groups, and build metadata
+    output/summary.json   counts per tag, upcoming deadlines (today onward,
+                          sorted by date), duplicate groups, build metadata
+    output/llm_disagreements.json  rule-vs-LLM tag mismatches (only when
+                          LLM_REFINE=1 ran)
 
 Duplicate notices (same text within or across groups) are grouped by a
 normalized key and shown once by the UI with a "seen N times" badge.
 
-Optional: set OLLAMA_REFINE=1 to let a local Ollama server double-check
-tags (disabled by default; rule-based tags are the MVP).
+Optional: set LLM_REFINE=1 and LLM_MODEL=<model id> to double-check tags
+against a local LM Studio server (OpenAI-compatible API, default
+http://localhost:1234/v1). Disabled by default; rule-based tags are the
+MVP. Refining runs on unique notices only, after dedupe.
 
 Standard library only. Usage:  python3 build.py [--data DIR] [--out DIR]
 """
@@ -24,7 +28,7 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 
-from categorizer import load_rules, refine_with_llm, tag_message
+from categorizer import last_llm_run, load_rules, refine_with_llm, tag_message
 from parser import parse_all
 
 WS_RE = re.compile(r"\s+")
@@ -99,6 +103,7 @@ def dedupe(messages):
 
 def build_summary(notices, total_messages):
     counts = Counter(n["tag"] for n in notices)
+    today = datetime.now().date().isoformat()
     deadlines = [
         {
             "id": n["id"],
@@ -110,7 +115,7 @@ def build_summary(notices, total_messages):
             "seen_count": n["seen_count"],
         }
         for n in notices
-        if n["deadline_iso"]
+        if n["deadline_iso"] and n["deadline_iso"] >= today
     ]
     deadlines.sort(key=lambda d: d["date"])
     duplicates = [
@@ -137,6 +142,32 @@ def build_summary(notices, total_messages):
     }
 
 
+def run_llm_refine(notices, out_dir):
+    """Refine unique notices with LM Studio; returns the one-line status.
+
+    Writes output/llm_disagreements.json. Any failure keeps rule tags.
+    """
+    disagreements_path = os.path.join(out_dir, "llm_disagreements.json")
+    if os.environ.get("LLM_REFINE") != "1":
+        if os.path.exists(disagreements_path):
+            os.remove(disagreements_path)  # stale results from an older run
+        return "LLM refine: off, using rules only."
+    try:
+        refine_with_llm(notices)
+    except ValueError as exc:  # e.g. LLM_MODEL missing
+        with open(disagreements_path, "w", encoding="utf-8") as fh:
+            json.dump([], fh)
+        return "LLM refine: unavailable (%s), using rules only." % exc
+    run = last_llm_run
+    with open(disagreements_path, "w", encoding="utf-8") as fh:
+        json.dump(run["disagreements"], fh, ensure_ascii=False, indent=2)
+    if run["checked"] == 0 and notices:
+        reason = run["error"] or "server gave no usable tags"
+        return "LLM refine: unavailable (%s), using rules only." % reason
+    return "LLM refine: ON (model %s at %s), %d disagreements." % (
+        run["model"], run["base_url"], len(run["disagreements"]))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build organizer JSON output.")
     parser.add_argument("--data", default="data", help="chat exports directory")
@@ -146,14 +177,11 @@ def main():
     rules = load_rules()
     raw = parse_all(args.data)
     tagged = [tag_message(message, rules) for message in raw]
-
-    if os.environ.get("OLLAMA_REFINE") == "1":
-        refine_with_llm(tagged, enabled=True)
-
     notices = dedupe(tagged)
-    summary = build_summary(notices, len(raw))
 
     os.makedirs(args.out, exist_ok=True)
+    llm_status = run_llm_refine(notices, args.out)
+    summary = build_summary(notices, len(raw))
     with open(os.path.join(args.out, "messages.json"), "w", encoding="utf-8") as fh:
         json.dump(notices, fh, ensure_ascii=False, indent=2)
     with open(os.path.join(args.out, "summary.json"), "w", encoding="utf-8") as fh:
@@ -163,6 +191,7 @@ def main():
     print("tag counts (unique): %s" % json.dumps(summary["counts_per_tag"]))
     print("duplicates: %d groups" % len(summary["duplicate_groups"]))
     print("deadlines: %d extracted" % len(summary["upcoming_deadlines"]))
+    print(llm_status)
     print("wrote %s" % os.path.join(args.out, "messages.json"))
 
 

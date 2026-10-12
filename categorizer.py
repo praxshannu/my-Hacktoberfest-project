@@ -15,9 +15,10 @@ Also extracts:
   - roll_count / display_text     : roll-number lists are counted and redacted;
     display_text is the only text the UI may show.
 
-Optional LLM hook: refine_with_llm() can re-tag via a local Ollama server.
-It is DISABLED by default and never required -- the rules above are the
-whole MVP. Enable with OLLAMA_REFINE=1 (see build.py).
+Optional LLM hook: refine_with_llm() can double-check rule tags against a
+local LM Studio server (OpenAI-compatible API). It is DISABLED by default
+and never required -- the rules above are the whole MVP. Enable with
+LLM_REFINE=1 and LLM_MODEL=<model id> (see build.py and README).
 
 Standard library only.
 """
@@ -297,42 +298,132 @@ def tag_message(message, rules=None):
 
 
 # ---------------------------------------------------------------------------
-# Optional local-LLM hook (disabled by default; never required for the MVP).
+# Optional local-LLM hook: LM Studio's OpenAI-compatible server.
+# Disabled by default; never required for the MVP.
+#
+#   LLM_REFINE=1            turn the second opinion on
+#   LLM_MODEL=<model id>    required when refining (no default)
+#   LLM_BASE_URL=...        default http://localhost:1234/v1
+#   LLM_OVERRIDE=1          let the LLM change "tag"; default off, in which
+#                           case only "tag_llm" is recorded for review
 # ---------------------------------------------------------------------------
 
-def refine_with_llm(messages, model="qwen2.5:3b",
-                    endpoint="http://localhost:11434", enabled=False):
-    """Optionally ask a local Ollama model to double-check rule tags.
+VALID_TAGS = ["Schedule", "Deadline", "Action", "Opportunity",
+              "Attendance", "Resource", "Noise"]
 
-    Disabled by default -- pass enabled=True (build.py does this only when
-    the OLLAMA_REFINE=1 environment variable is set). Any failure (no
-    server, bad reply) leaves the rule-based tags untouched.
+LLM_DEFAULT_BASE_URL = "http://localhost:1234/v1"
+LLM_TIMEOUT_SECONDS = 30
+LLM_MAX_TEXT_CHARS = 1000
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+# Run status of the last refine_with_llm() call, for the caller to report.
+last_llm_run = {
+    "enabled": False, "model": None, "base_url": LLM_DEFAULT_BASE_URL,
+    "override": False, "checked": 0, "disagreements": [], "error": None,
+}
+
+
+def parse_llm_tag(text):
+    """Map free-form model output to one canonical tag, or None.
+
+    Strips any <think>...</think> reasoning block, then takes the first
+    word that exactly matches a valid tag (case-insensitive, so
+    "  deadline. " maps to "Deadline"). Anything else is ignored.
     """
+    cleaned = _THINK_RE.sub(" ", text or "")
+    for word in re.split(r"\s+", cleaned):
+        token = re.sub(r"^[^A-Za-z]+|[^A-Za-z]+$", "", word)
+        for tag in VALID_TAGS:
+            if token and token.lower() == tag.lower():
+                return tag
+    return None
+
+
+def _llm_settings(model=None, base_url=None, enabled=None, override=None):
+    """Resolve settings from arguments, falling back to environment."""
+    if enabled is None:
+        enabled = os.environ.get("LLM_REFINE") == "1"
+    if base_url is None:
+        base_url = os.environ.get("LLM_BASE_URL", LLM_DEFAULT_BASE_URL)
+    if model is None:
+        model = os.environ.get("LLM_MODEL")
+    if override is None:
+        override = os.environ.get("LLM_OVERRIDE") == "1"
+    return enabled, model, base_url, override
+
+
+def _query_llm_tag(base_url, model, text):
+    """Ask the chat-completions endpoint for one tag; None when unusable."""
+    payload = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system",
+             "content": "Classify the WhatsApp message into exactly one tag: "
+                        + ", ".join(VALID_TAGS) + ". Reply with only the tag."},
+            {"role": "user", "content": (text or "")[:LLM_MAX_TEXT_CHARS]},
+        ],
+        "temperature": 0,
+        "max_tokens": 10,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/chat/completions", data=payload,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=LLM_TIMEOUT_SECONDS) as response:
+        reply = json.load(response)
+    content = reply["choices"][0]["message"]["content"]
+    return parse_llm_tag(content)
+
+
+def refine_with_llm(messages, model=None, base_url=None,
+                    enabled=None, override=None):
+    """Optionally double-check rule tags with a local LM Studio server.
+
+    Disabled by default (returns messages untouched). When enabled, each
+    message gains "tag_llm" (and "tag_rule" preserving the rule tag); the
+    rule "tag" only changes when override is on. Any per-message failure
+    (server down, bad reply) keeps the rule tag. Raises ValueError when
+    refining is enabled but LLM_MODEL is missing.
+
+    Run status is recorded in the module-level last_llm_run dict for the
+    caller to report (checked count, disagreements, first error).
+    """
+    enabled, model, base_url, override = _llm_settings(
+        model, base_url, enabled, override)
+    last_llm_run.update({
+        "enabled": enabled, "model": model, "base_url": base_url,
+        "override": override, "checked": 0, "disagreements": [], "error": None,
+    })
     if not enabled:
         return messages
-    tags = ["Schedule", "Deadline", "Action", "Opportunity",
-            "Attendance", "Resource", "Noise"]
-    for message in messages:
+    if not model:
+        error = ("LLM_MODEL is required when LLM_REFINE=1 "
+                 "(e.g. LLM_MODEL=qwen2.5-7b-instruct)")
+        last_llm_run["error"] = error
+        raise ValueError(error)
+    for index, message in enumerate(messages):
+        rule_tag = message.get("tag")
         try:
-            payload = json.dumps({
-                "model": model,
-                "stream": False,
-                "messages": [
-                    {"role": "system",
-                     "content": "Classify the WhatsApp message into exactly one tag: "
-                                + ", ".join(tags) + ". Reply with only the tag."},
-                    {"role": "user",
-                     "content": message.get("text", "")[:1000]},
-                ],
-            }).encode("utf-8")
-            request = urllib.request.Request(
-                endpoint.rstrip("/") + "/api/chat", data=payload,
-                headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(request, timeout=30) as response:
-                reply = json.load(response)
-            guess = reply.get("message", {}).get("content", "").strip()
-            if guess in tags:
-                message["tag_llm"] = guess
-        except Exception:
-            continue  # local model unavailable: keep rule-based tags
+            guess = _query_llm_tag(base_url, model, message.get("text", ""))
+        except Exception as exc:  # server down, timeout, bad reply: keep rules
+            if last_llm_run["error"] is None:
+                last_llm_run["error"] = "%s: %s" % (
+                    type(exc).__name__, exc)
+            continue
+        if guess is None:
+            continue
+        message["tag_llm"] = guess
+        message["tag_rule"] = rule_tag
+        last_llm_run["checked"] += 1
+        if guess != rule_tag:
+            last_llm_run["disagreements"].append({
+                "id": message.get("id", "m%04d" % (index + 1)),
+                "preview": message.get(
+                    "preview",
+                    re.sub(r"\s+", " ", message.get("text", ""))[:140]),
+                "rule_tag": rule_tag,
+                "llm_tag": guess,
+            })
+            if override:
+                message["tag"] = guess
     return messages
