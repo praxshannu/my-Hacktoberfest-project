@@ -2,6 +2,9 @@
 
 Turn WhatsApp college-group exports into a focused local dashboard for deadlines, actions, schedules, and opportunities.
 
+<img width="1710" height="1112" alt="image" src="https://github.com/user-attachments/assets/9efe44e0-c930-469e-b141-e9fb37584129" />
+
+
 Everything runs on your computer. The project uses Python’s standard library for parsing and building the dashboard data, so there is no cloud account or database to configure.
 
 ## Requirements
