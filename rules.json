@@ -1,0 +1,111 @@
+{
+  "_comment": "Rule-based tags for the college-group organizer. Edit keywords/patterns freely; lists are case-insensitive substrings unless listed under 'patterns' (regular expressions). Evaluation order is fixed in categorizer.py: Noise checks -> priority list below -> fallback.",
+  "priority": ["Attendance", "Deadline", "Action", "Schedule", "Opportunity", "Resource"],
+
+  "noise": {
+    "_comment": "Deleted messages are always Noise. The rest: bare links (a URL with almost no other text), media placeholders with no caption, and short acknowledgments.",
+    "max_ack_words": 5,
+    "ack_phrases": [
+      "ok", "okay", "noted", "thanks", "thank you", "thankyou", "tq",
+      "received", "same", "yes", "sure", "congratulations", "congrats",
+      "good morning", "good evening", "good night", "welcome", "fine",
+      "pic", "photo", "super", "nice", "great", "done", "shared",
+      "forwarded as received", "pls share", "please share"
+    ],
+    "bare_link_max_context_chars": 30
+  },
+
+  "due_words": [
+    "deadline", "last date", "last day", "final date", "due date", "due by", "submit by",
+    "cutoff", "cut-off", "closing date", "expires", "expiring",
+    "registration closes", "registrations close", "apply by"
+  ],
+
+  "tags": {
+    "Attendance": {
+      "_comment": "Absentee lists and attendance-taking announcements. Needs an attendance word PLUS a list, a roll id, or a take/post announcement -- a bare mention ('absentees also fill the form') falls through to Action.",
+      "keywords": ["absent", "absentee", "attendance"],
+      "patterns": [
+        "\\b\\d{2}[A-Za-z]\\d{2}[A-Za-z0-9]{3,5}\\b",
+        "(\\b[A-Za-z0-9]{1,4}\\b\\s*,\\s*){2,}\\b[A-Za-z0-9]{1,4}\\b",
+        "attendance\\s+(will be|is|was)\\s+\\w+\\s+(in|within)",
+        "(taking|takes|taken|post|posted|mark)\\S*\\s+(the\\s+)?attendance",
+        "attendance\\s+(mandatory|teesk|post|compulsory)"
+      ]
+    },
+    "Deadline": {
+      "_comment": "Due dates and cutoffs: a due word plus a date, or an explicit deadline/last-date statement.",
+      "keywords": [],
+      "patterns": []
+    },
+    "Action": {
+      "_comment": "Things the reader must do: register, fill, submit, upload, bring, reset...",
+      "keywords": [
+        "fill", "registration", "registrations", "register", "apply", "submit", "upload", "bring", "bring tomorrow",
+        "complete", "mandatory", "must", "compulsory", "urgent",
+        "without fail", "asap", "required", "requested to", "request all",
+        "kindly", "please", "reset", "update", "verify", "enroll",
+        "attend", "appear", "tisuku randi", "tisukuni randi",
+        "fill chey", "upload chey", "complete chey", "marchipokandi",
+        "meet me", "contact", "call chesi", "share", "forward",
+        "tomorrow morning", "by tomorrow", "today itself",
+        "hard cop", "xerox", "id card"
+      ],
+      "patterns": [
+        "\\bmust\\b", "\\battend\\b", "\\bbring\\b", "\\bsubmit\\b",
+        "\\bfill\\b", "\\bupload\\b", "\\bverify\\b", "\\bregister\\b",
+        "\\breset\\b", "\\bprepare\\b", "\\bwrite\\b", "\\bread\\b",
+        "\\bmark\\b", "\\bget\\b"
+      ]
+    },
+    "Schedule": {
+      "_comment": "Room allotments and class timings.",
+      "keywords": [
+        "room", "floor", "venue", "classroom", "class room", "allotted",
+        "timing", "schedule", "postponed", "rescheduled", "exam time",
+        "training", "period", "hour", "lunch", "break",
+        "come to", "go to", "move to", "sit in", "goto", "reach",
+        "commencing", "commence", "shifted", "hall", "block", "lab",
+        "s13", "sa14", "sa16", "akcnb"
+      ],
+      "patterns": [
+        "\\bSA\\s?\\d{1,2}\\b", "\\bS\\d{1,2}\\b",
+        "\\b\\d+(st|nd|rd|th)\\s+floor\\b", "\\bfloor\\b",
+        "come to", "go to", "move to", "sit in",
+        "exam\\s+time", "\\bpostponed\\b", "\\btraining\\b"
+      ]
+    },
+    "Opportunity": {
+      "_comment": "Contests, competitions, internships, programs, challenges.",
+      "keywords": [
+        "contest", "competition", "hackathon", "challenge", "internship",
+        "program", "innovation", "startup", "fellowship", "scholarship",
+        "kaggle", "unstop", "codechef", "hackday", "ideathon",
+        "olympiad", "hiring", "placement drive", "tournament", "quiz",
+        "mybharat", "course", "certification", "nptel", "workshop"
+      ],
+      "patterns": [
+        "\\bcontest\\b", "\\bhackathon\\b", "\\binternship\\b",
+        "\\bcompetition\\b", "\\bcodechef\\b", "\\bkaggle\\b",
+        "\\bunstop\\b", "\\bworkshop\\b"
+      ]
+    },
+    "Resource": {
+      "_comment": "Files, sheets, links with study material or forms-in-context.",
+      "keywords": [
+        "timetable", "time table", "syllabus", "sheet", "spreadsheet",
+        "pdf", "docx", "xlsx", "ppt", "pptx", "document", "drive",
+        "colab", "youtu", "video", "notes", "material", "resource",
+        "question bank", "assignment", "link", "portal",
+        "marks", "results", "notification", "circular", "guidelines",
+        "textbook", "reference", "record", "manual"
+      ],
+      "patterns": [
+        "\\.pdf\\b", "\\.docx?\\b", "\\.xlsx?\\b", "\\.pptx?\\b",
+        "forms\\.gle", "docs\\.google", "drive\\.google", "colab",
+        "youtu", "timetable", "question\\s+bank", "\\bmarks\\b",
+        "\\bforms?\\b"
+      ]
+    }
+  }
+}
