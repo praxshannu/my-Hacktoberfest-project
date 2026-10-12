@@ -86,9 +86,10 @@ def _text_without_urls(text):
 
 def _is_bare_link(text, rules):
     """A URL (or media placeholder) with almost no surrounding context."""
+    from parser import MEDIA_MARKERS  # single source of truth for placeholders
+
     stripped = _text_without_urls(text)
-    for marker in ("<image omitted>", "<document omitted>", "<video omitted>",
-                   "<audio omitted>", "<sticker omitted>", "<gif omitted>"):
+    for marker in MEDIA_MARKERS:
         stripped = stripped.replace(marker, " ").replace(marker.upper(), " ")
     stripped = re.sub(r"\s+", " ", stripped).strip(" .,:;-|")
     limit = rules.get("noise", {}).get("bare_link_max_context_chars", 30)

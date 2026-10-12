@@ -39,8 +39,10 @@ MEDIA_MARKERS = (
     "<video omitted>",
     "<document omitted>",
     "<audio omitted>",
+    "<voice message omitted>",
     "<sticker omitted>",
     "<gif omitted>",
+    "<unknown message>",
 )
 
 DELETED_PREFIX = "This message was deleted"
