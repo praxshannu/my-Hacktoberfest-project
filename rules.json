@@ -39,15 +39,15 @@
       "patterns": []
     },
     "Action": {
-      "_comment": "Things the reader must do: register, fill, submit, upload, bring, reset...",
+      "_comment": "Things the reader must do: register, fill, submit, upload, bring, reset... NOTE: keep these narrow. Substring keywords that also match status text ('attend' hit 'attendance', 'register' hit 'registerno@...' and bare '147 registered', 'forward' hit '[Forwarded many times]' provenance) were removed; whole-word patterns below cover the real imperatives.",
       "keywords": [
-        "fill", "registration", "registrations", "register", "apply", "submit", "upload", "bring", "bring tomorrow",
+        "fill", "registration", "registrations", "apply", "submit", "upload", "bring", "bring tomorrow",
         "complete", "mandatory", "must", "compulsory", "urgent",
         "without fail", "asap", "required", "requested to", "request all",
         "kindly", "please", "reset", "update", "verify", "enroll",
-        "attend", "appear", "tisuku randi", "tisukuni randi",
+        "appear", "need to", "tisuku randi", "tisukuni randi",
         "fill chey", "upload chey", "complete chey", "marchipokandi",
-        "meet me", "contact", "call chesi", "share", "forward",
+        "meet me", "contact", "call chesi", "share",
         "tomorrow morning", "by tomorrow", "today itself",
         "hard cop", "xerox", "id card"
       ],

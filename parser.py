@@ -55,6 +55,13 @@ _INVISIBLE = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 # they never match this.
 _PHONE_RE = re.compile(r"\+?\d[\d\s\-]{8,}\d")
 
+# Login secrets that sometimes appear in group messages (exam portal
+# credentials, "email : ... / password : ..." instructions).
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PASSWORD_RE = re.compile(
+    r"\b(password|passwd|pwd|otp)\s*[:=]\s*([^\s,;]+)", re.IGNORECASE
+)
+
 
 def _digits(s):
     return re.sub(r"\D", "", s)
@@ -99,6 +106,17 @@ def mask_phones_in_text(text):
         return "+91 ***** %s" % digits[-4:]
 
     return _PHONE_RE.sub(_repl, text)
+
+
+def mask_secrets(text):
+    """Mask emails and password/OTP values; labels are kept for context.
+
+    Passwords are masked first so a "password : user@example.com" value is
+    swallowed whole; remaining emails are masked wherever they appear,
+    including inside URLs (privacy wins over clickable links here).
+    """
+    text = _PASSWORD_RE.sub(lambda m: "%s: [hidden]" % m.group(1), text)
+    return _EMAIL_RE.sub("[email hidden]", text)
 
 
 def parse_timestamp(raw):
@@ -169,7 +187,7 @@ def parse_file(path, group=None):
                 "timestamp": parse_timestamp(dt_raw),
                 "timestamp_raw": dt_raw,
                 "sender_masked": mask_sender(sender_raw),
-                "text": mask_phones_in_text(body),
+                "text": mask_secrets(mask_phones_in_text(body)),
                 "is_forwarded": is_forwarded,
                 "is_media": is_media,
                 "is_deleted": is_deleted,

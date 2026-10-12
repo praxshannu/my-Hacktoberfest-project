@@ -9,6 +9,7 @@ import re
 from parser import (
     _split_raw_messages,
     mask_phones_in_text,
+    mask_secrets,
     mask_sender,
     parse_file,
 )
@@ -114,6 +115,15 @@ def test_no_raw_phone_numbers_leak(tmp_path):
 def test_url_query_keys_not_masked():
     text = "https://example.com/pages/event?key=627157394627"
     assert mask_phones_in_text(text) == text
+
+
+def test_secrets_masked():
+    assert mask_secrets("email : somebody@example.edu and password : S3cret!") == \
+        "email : [email hidden] and password: [hidden]"
+    assert mask_secrets("OTP : 482913, do not share") == "OTP: [hidden], do not share"
+    # Labels without values pass through untouched.
+    assert mask_secrets("reset their passwords within 24 hours") == \
+        "reset their passwords within 24 hours"
 
 
 def test_split_handles_both_year_widths():
