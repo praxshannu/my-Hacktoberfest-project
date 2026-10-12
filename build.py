@@ -39,6 +39,7 @@ PASSWORD_RE = re.compile(r"\b(password|passwd|pwd)\s*[:=]\s*([^\s,;]+)", re.IGNO
 def redact_display(text):
     """Final privacy pass for UI text, independent of parser internals."""
     text = PASSWORD_RE.sub(lambda m: "%s: [hidden]" % m.group(1), text or "")
+    text = re.sub(r"\bpasswords?\b", "[credential]", text, flags=re.IGNORECASE)
     return EMAIL_RE.sub("[email hidden]", text)
 
 

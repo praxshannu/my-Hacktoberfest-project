@@ -1,10 +1,14 @@
 """Stdlib-only local web server and loopback LM Studio proxy."""
 import json, os, re
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+try:
+    from .tasks import eligible, public_task, sort_tasks, text_hash
+except ImportError:  # direct `python web/server.py` launch
+    from tasks import eligible, public_task, sort_tasks, text_hash
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_BASE = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:1234").rstrip("/")
@@ -51,7 +55,28 @@ def model_status():
 
 def strip_thinking(text): return re.sub(r"<think>.*?</think>", "", text or "", flags=re.I | re.S).strip()
 
+def date_context(now=None):
+    now = now or datetime.now().astimezone()
+    return now.date(), "Today is %s, %d %s %d (%s). Resolve 'today', 'tomorrow', weekdays, and 'this week' relative to this date." % (now.strftime("%A"), now.day, now.strftime("%B"), now.year, now.date().isoformat())
+
+def notices_for_question(question, notices):
+    """Apply deterministic constraints for the today-actions query."""
+    if "what should i do today" not in question.lower(): return notices
+    today, _ = date_context()
+    selected = []
+    for notice in notices:
+        deadline = None
+        try: deadline = datetime.strptime(notice.get("deadline_iso", ""), "%Y-%m-%d").date()
+        except (TypeError, ValueError): pass
+        text = str(notice.get("display_text", "")).lower()
+        if deadline and today - timedelta(days=7) <= deadline <= today + timedelta(days=7):
+            selected.append(notice)
+        elif notice.get("tag") == "Action" and ("today" in text or "tomorrow" in text):
+            selected.append(notice)
+    return selected
+
 def prompt_for(question, notices, cap=9000):
+    notices = notices_for_question(question, notices)
     ordered = sorted(notices, key=lambda n: (n.get("deadline_iso") or "9999-99-99", n.get("timestamp") or ""))
     chunks = []
     for n in ordered:
@@ -61,8 +86,14 @@ def prompt_for(question, notices, cap=9000):
         chunks.append(chunk)
     omitted = len(ordered) - len(chunks)
     note = "\n%d least urgent notices omitted due to prompt size." % omitted if omitted else ""
-    system = ("Use only the supplied notices. Do not invent dates, names, or links. Give only the final answer with no reasoning. "
-              "If the notices do not contain the answer, say exactly: The notices don't contain enough information to answer this.")
+    _, date_line = date_context()
+    system = (date_line + " Answer only from the supplied notices and do not invent dates, names, or links. Give only the final answer. "
+              "For greetings or questions about the app (such as hi or what can you do), reply briefly that you can answer "
+              "questions about the visible notices, such as deadlines, actions, and schedules. "
+              "If the notices don't contain the answer, say exactly: The notices don't contain enough information to answer this. "
+              "For 'what should I do today', list only tasks due today plus overdue items, then put undated tasks under a separate heading 'No date'. "
+              "Use short bullet points with a date on each item, no more than 8 items. If nothing is due today, say so clearly and list the next 3 dated items. "
+              "For greetings, reply in one sentence.")
     user = "Question: %s\nNotices:\n%s%s" % (question, "\n".join(chunks), note)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}], len(chunks)
 
@@ -74,6 +105,11 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
     def app_log(self, route, model, count, status): print("%s %s model=%s notices=%d status=%d" % (datetime.now().isoformat(timespec="seconds"), route, model or "-", count, status), flush=True)
     def do_GET(self):
+        if self.path == "/":
+            self.send_response(302)
+            self.send_header("Location", "/web/")
+            self.end_headers()
+            return
         if self.path == "/api/notices":
             path = os.path.join(ROOT, "output", "messages.json")
             if not os.path.exists(path):
@@ -89,11 +125,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self.send_json(200, notices); self.app_log(self.path, "", len(notices), 200); return
         if self.path in ("/api/status", "/api/models"):
-            ok, ids, err = model_status(); body = {"connected": ok, "models": ids};
+            today, _ = date_context(); body = {"today_iso": today.isoformat(), "today_label": today.strftime("%A, %-d %B %Y")}
+            ok, ids, err = model_status(); body.update({"connected": ok, "models": ids});
             if err: body["error"] = err
             self.send_json(200, body); self.app_log(self.path, "", 0, 200); return
+        if self.path == "/api/tasks":
+            self.send_json(200, load_tasks()); return
         super().do_GET()
     def do_POST(self):
+        if self.path == "/api/tasks/generate":
+            self.generate_tasks(); return
         if self.path != "/api/chat": self.send_json(404, {"error": "Unknown route"}); return
         try: body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
         except Exception: self.send_json(400, {"error": "Invalid JSON body"}); self.app_log(self.path, "", 0, 400); return
@@ -105,12 +146,65 @@ class Handler(SimpleHTTPRequestHandler):
         if model not in ids: self.send_json(400, {"error": "Model '%s' is not currently loaded" % model}); self.app_log(self.path, model, len(notices), 400); return
         messages, included = prompt_for(question, notices)
         try:
-            data = _request(OPENAI_BASE + "/chat/completions", "POST", {"model": model, "messages": messages, "temperature": .2, "max_tokens": 600}, 45)
-            content = strip_thinking(((data.get("choices") or [{}])[0].get("message") or {}).get("content", ""))
-            if not content: raise ValueError("Model returned no final answer")
+            request_body = {"model": model, "messages": messages, "reasoning_effort": "none", "temperature": 0, "max_tokens": 1500}
+            try:
+                data = _request(OPENAI_BASE + "/chat/completions", "POST", request_body, 45)
+            except UpstreamError as exc:
+                if "reasoning_effort" not in str(exc).lower(): raise
+                print("LM Studio rejected reasoning_effort; retrying once without it", flush=True)
+                request_body.pop("reasoning_effort", None)
+                data = _request(OPENAI_BASE + "/chat/completions", "POST", request_body, 45)
+            choice = (data.get("choices") or [{}])[0]
+            content = strip_thinking((choice.get("message") or {}).get("content", ""))
+            if not content:
+                message = ("The model ran out of room before answering. Try a shorter question or fewer notices."
+                           if choice.get("finish_reason") == "length" else
+                           "The model returned no answer. Check LM Studio's logs.")
+                raise ValueError(message)
         except ValueError as exc: self.send_json(502, {"error": str(exc)}); self.app_log(self.path, model, included, 502); return
         except Exception as exc: self.send_json(502, {"error": _error(exc)}); self.app_log(self.path, model, included, 502); return
         self.send_json(200, {"answer": content, "model": model, "notice_count": included}); self.app_log(self.path, model, included, 200)
+
+    def generate_tasks(self):
+        try: body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        except Exception: body = {}
+        model = body.get("model")
+        try:
+            with open(os.path.join(ROOT, "output", "messages.json"), encoding="utf-8") as fh: notices = json.load(fh)
+            today, date_line = date_context(); path = os.path.join(ROOT, "output", "tasks.json")
+            cache = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {"updated_at": None, "tasks": {}}
+            cache.setdefault("tasks", {}); candidates = [n for n in notices if eligible(n, today)]
+            ok, ids, err = model_status()
+            if not model: model = ids[0] if ids else None
+            generated = skipped = 0
+            for index, notice in enumerate(candidates, 1):
+                h = text_hash(notice); old = cache["tasks"].get(notice["id"])
+                if old and old.get("text_hash") == h: continue
+                if not ok or not model:
+                    skipped += 1; continue
+                messages = [{"role": "system", "content": date_line + " Return JSON only with keys actionable, title (max 8 words), steps, due_date, due_text. Extract only from this notice."}, {"role": "user", "content": json.dumps(notice, ensure_ascii=False)}]
+                try:
+                    data = _request(OPENAI_BASE + "/chat/completions", "POST", {"model": model, "messages": messages, "temperature": 0, "reasoning_effort": "none", "max_tokens": 400}, 45)
+                    raw = strip_thinking(((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")); result = json.loads(raw)
+                    if not result.get("actionable"): continue
+                    result.update({"id": notice["id"], "text_hash": h})
+                    if notice.get("deadline_iso"): result["due_date"] = notice["deadline_iso"]
+                    cache["tasks"][notice["id"]] = result; generated += 1
+                except Exception:
+                    skipped += 1; print("Skipping invalid task JSON for %s" % notice["id"], flush=True)
+            cache["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            with open(path, "w", encoding="utf-8") as fh: json.dump(cache, fh, ensure_ascii=False, indent=2)
+            self.send_json(200, {"processed": len(candidates), "generated": generated, "skipped": skipped, "cached": len(cache["tasks"]), "updated_at": cache["updated_at"]})
+        except Exception as exc: self.send_json(500, {"error": str(exc)})
+
+def load_tasks():
+    path = os.path.join(ROOT, "output", "tasks.json")
+    try:
+        cache = json.load(open(path, encoding="utf-8")); today, _ = date_context()
+        notices = {n["id"]: n for n in json.load(open(os.path.join(ROOT, "output", "messages.json"), encoding="utf-8"))}
+        items = [public_task(t, notices[t["id"]], today) for t in cache.get("tasks", {}).values() if t.get("actionable") and t.get("id") in notices]
+        return {"updated_at": cache.get("updated_at"), "tasks": sort_tasks(items)}
+    except (OSError, ValueError, KeyError, TypeError): return {"updated_at": None, "tasks": []}
 
 def main():
     print("Organizer: http://127.0.0.1:%d/web/" % PORT, flush=True)
