@@ -65,17 +65,32 @@ After editing, re-run `python3 build.py` and reload the page.
 
 - Phone-number senders are masked (`+91 ***** 4322`) at parse time; the
   masker skips URLs so links keep working.
+- Emails become `[email hidden]`; `password:` / `otp:` values become
+  `[hidden]` (labels stay so you still know a credential was shared).
 - Roll-number lists are counted and redacted during the build -- `output/`
   and the UI only ever see counts, never the lists.
 - `data/` and `output/` are git-ignored and never committed.
 
-## Optional: local LLM second opinion (off by default)
+## Optional: local LLM second opinion via LM Studio (off by default)
 
-`categorizer.refine_with_llm()` can ask an Ollama server on localhost to
-double-check tags. It is disabled unless you opt in:
+`categorizer.refine_with_llm()` can ask a local LM Studio server
+(OpenAI-compatible API) to double-check tags on the unique notices. Rule
+tags always stand unless you opt into override. Any failure (server down,
+bad reply) keeps the rule tags, and every mismatch is logged to
+`output/llm_disagreements.json` for review.
+
+1. In LM Studio, load your model, then start its server from the
+   **Developer tab** (default address `http://localhost:1234/v1`).
+2. Note the exact model id LM Studio shows (e.g. `qwen2.5-7b-instruct`).
+3. Run the build with refining turned on:
 
 ```bash
-OLLAMA_REFINE=1 python3 build.py
+LLM_REFINE=1 LLM_MODEL=<model id> python3 build.py
 ```
 
-If Ollama is unreachable, rule-based tags stand unchanged.
+| Variable       | Meaning                                                        |
+| -------------- | -------------------------------------------------------------- |
+| `LLM_REFINE=1` | Turn the second opinion on (default: off).                     |
+| `LLM_MODEL`    | Model id as shown by LM Studio. Required when refining.        |
+| `LLM_BASE_URL` | Server base URL. Default `http://localhost:1234/v1`.           |
+| `LLM_OVERRIDE=1` | Let the LLM change `tag` (default off: only `tag_llm` is set, `tag_rule` keeps the rule tag). |
